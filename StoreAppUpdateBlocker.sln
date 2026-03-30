@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StoreAppUpdateBlocker", "StoreAppUpdateBlocker.csproj", "{DAD0F4F9-1B69-135F-CFC9-763F836ED038}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DAD0F4F9-1B69-135F-CFC9-763F836ED038}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DAD0F4F9-1B69-135F-CFC9-763F836ED038}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DAD0F4F9-1B69-135F-CFC9-763F836ED038}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DAD0F4F9-1B69-135F-CFC9-763F836ED038}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {FB5CF128-DFF3-479C-B891-548A9179E5CD}
+	EndGlobalSection
+EndGlobal
