@@ -1,8 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- 'WinExe' makes the app run completely invisibly without a console window -->
-    <OutputType>WinExe</OutputType> 
-    <!-- This gives the app native access to Windows 10/11 WinRT APIs -->
+    <OutputType>Exe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
