@@ -1,6 +1,8 @@
 @echo off
-REM install.bat — create a shortcut in the user's Startup folder
+setlocal
+REM install.bat — create a shortcut in the user's Startup folder and launch the blocker now
 REM The shortcut will launch the .exe in this folder with the --background argument.
+REM Launching the blocker now will replace any running copy by default.
 REM Usage: double-click this file, or run: install.bat [MyApp.exe]
 
 REM Find exe: use argument if provided, otherwise pick first *.exe in current directory
@@ -27,20 +29,24 @@ if "%~1"=="" (
 echo Using "%FOUND_EXE%"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$WshShell = New-Object -ComObject WScript.Shell; ^
+  "$exe = $env:FOUND_EXE; ^
+  $workingDirectory = Split-Path $exe; ^
+  $WshShell = New-Object -ComObject WScript.Shell; ^
   $startup = [Environment]::GetFolderPath('Startup'); ^
   $link = Join-Path $startup 'StoreAppUpdateBlocker.lnk'; ^
   $s = $WshShell.CreateShortcut($link); ^
-  $s.TargetPath = '%FOUND_EXE%'; ^
+  $s.TargetPath = $exe; ^
   $s.Arguments = '--background'; ^
-  $s.WorkingDirectory = Split-Path '%FOUND_EXE%'; ^
-  $s.IconLocation = '%FOUND_EXE%'; ^
+  $s.WorkingDirectory = $workingDirectory; ^
+  $s.IconLocation = $exe; ^
   $s.Save(); ^
-  Write-Output ( 'Created shortcut at ' + $link )"
+  Start-Process -FilePath $exe -ArgumentList '--background' -WorkingDirectory $workingDirectory -WindowStyle Hidden -ErrorAction Stop; ^
+  Write-Output ( 'Created shortcut at ' + $link ); ^
+  Write-Output 'Launched StoreAppUpdateBlocker.'"
 
 if %ERRORLEVEL% EQU 0 (
-  echo Shortcut created in Startup.
+  echo Shortcut created in Startup and blocker launched.
 ) else (
-  echo Failed to create shortcut.
+  echo Failed to create shortcut or launch blocker.
 )
 pause

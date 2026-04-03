@@ -79,6 +79,18 @@ Hidden queue scan mode:
 StoreAppUpdateBlocker.exe --queue-scan --background
 ```
 
+Replace an already-running blocker instance, then continue with this launch:
+
+```cmd
+StoreAppUpdateBlocker.exe --background
+```
+
+Exit immediately instead of replacing a running blocker instance:
+
+```cmd
+StoreAppUpdateBlocker.exe --background --exit-if-running
+```
+
 ## Logs
 
 The app writes a small text log here:
@@ -93,7 +105,9 @@ That gives you a way to confirm it started even when `--background` is used.
 
 ### Startup folder
 
-Create a shortcut and set arguments if you want hidden mode:
+Run `install.bat` from the published folder to create the Startup shortcut and immediately launch the blocker. A new launch replaces any already-running blocker instance by default, so a newer copy takes over cleanly during updates.
+
+Create a shortcut manually and set arguments if you want hidden mode:
 
 ```powershell
 $exe = "C:\full\path\to\StoreAppUpdateBlocker.exe"
@@ -123,4 +137,7 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v StoreAppUpdateBl
 
 - `--event-hook` is the lowest-idle option.
 - `--queue-scan` is available if the event hook proves unreliable on your machine.
-- The app keeps a single instance running and logs startup, cancellation attempts, and errors.
+- The app keeps a single active instance.
+- A new launch replaces the currently-running blocker instance by default, which is useful during updates.
+- `--exit-if-running` restores the older behavior and exits when another instance is already active.
+- The app logs startup, cancellation attempts, and errors.

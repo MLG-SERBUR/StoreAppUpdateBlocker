@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -24,10 +25,12 @@ namespace StoreBlocker
             new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
 
         private const string InstanceMutexName = @"Local\StoreAppUpdateBlocker";
+        private const string InstanceInfoFileName = "active-instance.txt";
         private const int SwHide = 0;
         private const uint WmQuit = 0x0012;
         private const uint PmNoRemove = 0x0000;
         private static readonly TimeSpan DuplicateSuppressWindow = TimeSpan.FromSeconds(15);
+        private static readonly TimeSpan ReplaceExistingTimeout = TimeSpan.FromSeconds(10);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct Point
@@ -59,6 +62,7 @@ namespace StoreBlocker
             public WatchMode Mode { get; private set; } = WatchMode.EventHook;
             public TimeSpan ScanInterval { get; private set; } = TimeSpan.FromSeconds(3);
             public bool Background { get; private set; }
+            public bool ReplaceExisting { get; private set; } = true;
             public bool ShowHelp { get; private set; }
 
             public static Options Parse(string[] args)
@@ -93,6 +97,12 @@ namespace StoreBlocker
                         case "--background":
                             options.Background = true;
                             break;
+                        case "--replace-existing":
+                            options.ReplaceExisting = true;
+                            break;
+                        case "--exit-if-running":
+                            options.ReplaceExisting = false;
+                            break;
                         case "--help":
                         case "-h":
                         case "/?":
@@ -105,6 +115,13 @@ namespace StoreBlocker
 
                 return options;
             }
+        }
+
+        private sealed class InstanceInfo
+        {
+            public int ProcessId { get; init; }
+            public long StartTimeUtcTicks { get; init; }
+            public string ExecutablePath { get; init; } = string.Empty;
         }
 
         [DllImport("kernel32.dll")]
@@ -163,42 +180,74 @@ namespace StoreBlocker
             }
 
             using var instanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
-            if (!createdNew)
-            {
-                WriteInfo("Another instance is already running.");
-                return 0;
-            }
+            var ownsMutex = createdNew;
 
-            WriteInfo("Store App Update Blocker starting.");
-            WriteInfo(string.Format(
-                CultureInfo.InvariantCulture,
-                "Mode: {0}. PID: {1}. Log: {2}",
-                options.Mode,
-                Environment.ProcessId,
-                GetLogPath()));
-            WriteInfo("Blocked apps: " + string.Join(", ", BlockedApps));
+            if (!ownsMutex)
+            {
+                if (!options.ReplaceExisting)
+                {
+                    WriteInfo("Another instance is already running.");
+                    return 0;
+                }
 
-            AppInstallManager appManager;
-            try
-            {
-                appManager = new AppInstallManager();
-            }
-            catch (Exception ex)
-            {
-                WriteError("Failed to create AppInstallManager.", ex);
-                return 1;
+                if (!TryReplaceExistingInstance(instanceMutex))
+                {
+                    return 1;
+                }
+
+                ownsMutex = true;
             }
 
             try
             {
-                return options.Mode == WatchMode.QueueScan
-                    ? RunQueueScan(appManager, options)
-                    : RunEventHook(appManager);
+                WriteInstanceInfo();
+                WriteInfo("Store App Update Blocker starting.");
+                WriteInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Mode: {0}. PID: {1}. Log: {2}",
+                    options.Mode,
+                    Environment.ProcessId,
+                    GetLogPath()));
+                WriteInfo("Blocked apps: " + string.Join(", ", BlockedApps));
+
+                AppInstallManager appManager;
+                try
+                {
+                    appManager = new AppInstallManager();
+                }
+                catch (Exception ex)
+                {
+                    WriteError("Failed to create AppInstallManager.", ex);
+                    return 1;
+                }
+
+                try
+                {
+                    return options.Mode == WatchMode.QueueScan
+                        ? RunQueueScan(appManager, options)
+                        : RunEventHook(appManager);
+                }
+                catch (Exception ex)
+                {
+                    WriteError("Unhandled fatal error.", ex);
+                    return 1;
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                WriteError("Unhandled fatal error.", ex);
-                return 1;
+                ClearInstanceInfo();
+
+                if (ownsMutex)
+                {
+                    try
+                    {
+                        instanceMutex.ReleaseMutex();
+                    }
+                    catch (ApplicationException)
+                    {
+                        // Another shutdown path may have already released the mutex.
+                    }
+                }
             }
         }
 
@@ -464,6 +513,351 @@ namespace StoreBlocker
             }
         }
 
+        private static bool TryReplaceExistingInstance(Mutex instanceMutex)
+        {
+            using var currentProcess = Process.GetCurrentProcess();
+            var currentProcessPath = GetProcessPath(currentProcess);
+            var replaceableProcesses = FindReplaceableProcesses(currentProcess.Id, currentProcessPath);
+
+            try
+            {
+                if (replaceableProcesses.Count == 0)
+                {
+                    WriteInfo("Another instance is already running. Waiting for it to exit so this copy can take over.");
+                }
+
+                foreach (var process in replaceableProcesses)
+                {
+                    if (!TryTerminateProcess(process))
+                    {
+                        return false;
+                    }
+                }
+
+                var deadline = DateTimeOffset.UtcNow + ReplaceExistingTimeout;
+                foreach (var process in replaceableProcesses)
+                {
+                    if (!WaitForProcessExit(process, deadline))
+                    {
+                        return false;
+                    }
+                }
+
+                if (WaitForMutexOwnership(instanceMutex, deadline))
+                {
+                    WriteInfo("Existing blocker instance replaced successfully.");
+                    return true;
+                }
+
+                WriteError("Timed out waiting for the previous blocker instance to release the single-instance lock.");
+                return false;
+            }
+            finally
+            {
+                foreach (var process in replaceableProcesses)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        private static List<Process> FindReplaceableProcesses(int currentProcessId, string currentProcessPath)
+        {
+            var matches = new List<Process>();
+            var seenProcessIds = new HashSet<int>();
+
+            TryAddProcessFromInstanceInfo(matches, seenProcessIds, currentProcessId);
+
+            if (string.IsNullOrWhiteSpace(currentProcessPath))
+            {
+                return matches;
+            }
+
+            var currentProcessName = Path.GetFileNameWithoutExtension(currentProcessPath);
+            if (string.IsNullOrWhiteSpace(currentProcessName))
+            {
+                return matches;
+            }
+
+            foreach (var process in Process.GetProcessesByName(currentProcessName))
+            {
+                if (process.Id == currentProcessId || !seenProcessIds.Add(process.Id))
+                {
+                    process.Dispose();
+                    continue;
+                }
+
+                var processPath = GetProcessPath(process);
+                if (!string.Equals(processPath, currentProcessPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    process.Dispose();
+                    continue;
+                }
+
+                matches.Add(process);
+            }
+
+            return matches;
+        }
+
+        private static void TryAddProcessFromInstanceInfo(List<Process> matches, HashSet<int> seenProcessIds, int currentProcessId)
+        {
+            if (!TryReadInstanceInfo(out var instanceInfo) || instanceInfo.ProcessId == currentProcessId)
+            {
+                return;
+            }
+
+            Process? process = null;
+
+            try
+            {
+                process = Process.GetProcessById(instanceInfo.ProcessId);
+            }
+            catch
+            {
+                return;
+            }
+
+            var processPath = GetProcessPath(process);
+            if (!TryGetProcessStartTimeUtcTicks(process, out var startTimeUtcTicks) ||
+                startTimeUtcTicks != instanceInfo.StartTimeUtcTicks ||
+                (!string.IsNullOrWhiteSpace(instanceInfo.ExecutablePath) &&
+                 !string.Equals(processPath, instanceInfo.ExecutablePath, StringComparison.OrdinalIgnoreCase)) ||
+                !seenProcessIds.Add(process.Id))
+            {
+                process.Dispose();
+                return;
+            }
+
+            matches.Add(process);
+        }
+
+        private static bool TryTerminateProcess(Process process)
+        {
+            try
+            {
+                if (process.HasExited)
+                {
+                    return true;
+                }
+
+                WriteInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stopping running blocker instance PID {0}.",
+                    process.Id));
+                process.Kill(entireProcessTree: true);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+            catch (Exception ex)
+            {
+                WriteError(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Failed to stop running blocker instance PID {0}.",
+                    process.Id), ex);
+                return false;
+            }
+        }
+
+        private static bool WaitForProcessExit(Process process, DateTimeOffset deadline)
+        {
+            try
+            {
+                if (process.HasExited)
+                {
+                    return true;
+                }
+
+                var remaining = deadline - DateTimeOffset.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return false;
+                }
+
+                if (process.WaitForExit((int)Math.Ceiling(remaining.TotalMilliseconds)))
+                {
+                    return true;
+                }
+
+                WriteError(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Timed out waiting for blocker instance PID {0} to exit.",
+                    process.Id));
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+            catch (Exception ex)
+            {
+                WriteError(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Failed while waiting for blocker instance PID {0} to exit.",
+                    process.Id), ex);
+                return false;
+            }
+        }
+
+        private static bool WaitForMutexOwnership(Mutex instanceMutex, DateTimeOffset deadline)
+        {
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                return instanceMutex.WaitOne(remaining);
+            }
+            catch (AbandonedMutexException)
+            {
+                return true;
+            }
+        }
+
+        private static void WriteInstanceInfo()
+        {
+            try
+            {
+                using var currentProcess = Process.GetCurrentProcess();
+                var startTimeUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks;
+                var instanceInfoPath = GetInstanceInfoPath();
+                var appDataDirectory = GetAppDataDirectory();
+
+                Directory.CreateDirectory(appDataDirectory);
+                File.WriteAllLines(instanceInfoPath, new[]
+                {
+                    "PID=" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
+                    "StartTimeUtcTicks=" + startTimeUtcTicks.ToString(CultureInfo.InvariantCulture),
+                    "Path=" + GetProcessPath(currentProcess)
+                });
+            }
+            catch (Exception ex)
+            {
+                WriteError("Failed to write active instance metadata.", ex);
+            }
+        }
+
+        private static void ClearInstanceInfo()
+        {
+            try
+            {
+                if (!TryReadInstanceInfo(out var instanceInfo))
+                {
+                    return;
+                }
+
+                if (instanceInfo.ProcessId != Environment.ProcessId)
+                {
+                    return;
+                }
+
+                using var currentProcess = Process.GetCurrentProcess();
+                if (!TryGetProcessStartTimeUtcTicks(currentProcess, out var currentStartTimeUtcTicks) ||
+                    currentStartTimeUtcTicks != instanceInfo.StartTimeUtcTicks)
+                {
+                    return;
+                }
+
+                File.Delete(GetInstanceInfoPath());
+            }
+            catch
+            {
+                // Shutdown cleanup should never take the process down.
+            }
+        }
+
+        private static bool TryReadInstanceInfo(out InstanceInfo instanceInfo)
+        {
+            instanceInfo = new InstanceInfo();
+
+            try
+            {
+                var instanceInfoPath = GetInstanceInfoPath();
+                if (!File.Exists(instanceInfoPath))
+                {
+                    return false;
+                }
+
+                var lines = File.ReadAllLines(instanceInfoPath);
+                var processId = -1;
+                long startTimeUtcTicks = 0;
+                var executablePath = string.Empty;
+
+                foreach (var line in lines)
+                {
+                    if (line.StartsWith("PID=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ = int.TryParse(
+                            line["PID=".Length..],
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out processId);
+                    }
+                    else if (line.StartsWith("StartTimeUtcTicks=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _ = long.TryParse(
+                            line["StartTimeUtcTicks=".Length..],
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out startTimeUtcTicks);
+                    }
+                    else if (line.StartsWith("Path=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        executablePath = line["Path=".Length..];
+                    }
+                }
+
+                if (processId <= 0 || startTimeUtcTicks <= 0)
+                {
+                    return false;
+                }
+
+                instanceInfo = new InstanceInfo
+                {
+                    ProcessId = processId,
+                    StartTimeUtcTicks = startTimeUtcTicks,
+                    ExecutablePath = executablePath
+                };
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetProcessStartTimeUtcTicks(Process process, out long startTimeUtcTicks)
+        {
+            try
+            {
+                startTimeUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+                return true;
+            }
+            catch
+            {
+                startTimeUtcTicks = 0;
+                return false;
+            }
+        }
+
+        private static string GetProcessPath(Process process)
+        {
+            try
+            {
+                return process.MainModule?.FileName ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
         private static void PrintHelp()
         {
             Console.WriteLine("Usage: StoreAppUpdateBlocker.exe [options]");
@@ -473,6 +867,8 @@ namespace StoreBlocker
             Console.WriteLine("  --queue-scan            Poll AppInstallItems instead of waiting for events.");
             Console.WriteLine("  --scan-interval <secs>  Queue scan interval in seconds. Default: 3.");
             Console.WriteLine("  --background            Hide the console window after startup.");
+            Console.WriteLine("  --replace-existing      Replace a running blocker instance (default behavior).");
+            Console.WriteLine("  --exit-if-running       Exit instead of replacing an existing blocker instance.");
             Console.WriteLine("  --help                  Show this help.");
         }
 
@@ -531,10 +927,19 @@ namespace StoreBlocker
 
         private static string GetLogPath()
         {
+            return Path.Combine(GetAppDataDirectory(), "StoreAppUpdateBlocker.log");
+        }
+
+        private static string GetInstanceInfoPath()
+        {
+            return Path.Combine(GetAppDataDirectory(), InstanceInfoFileName);
+        }
+
+        private static string GetAppDataDirectory()
+        {
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "StoreAppUpdateBlocker",
-                "StoreAppUpdateBlocker.log");
+                "StoreAppUpdateBlocker");
         }
     }
 }
