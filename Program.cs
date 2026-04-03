@@ -327,7 +327,8 @@ namespace StoreBlocker
             }
 
             var state = GetInstallState(item);
-            if (!ShouldAttemptCancel(packageFamilyName, productId, state))
+            if (!CanCancelInState(state) ||
+                !ShouldAttemptCancel(packageFamilyName, productId, state))
             {
                 return;
             }
@@ -415,6 +416,18 @@ namespace StoreBlocker
                 RecentAttempts[key] = now;
                 return true;
             }
+        }
+
+        private static bool CanCancelInState(AppInstallState? state)
+        {
+            if (!state.HasValue)
+            {
+                return true;
+            }
+
+            return state.Value != AppInstallState.Canceled &&
+                   state.Value != AppInstallState.Completed &&
+                   state.Value != AppInstallState.Error;
         }
 
         private static void PruneRecentAttempts(DateTimeOffset now)
