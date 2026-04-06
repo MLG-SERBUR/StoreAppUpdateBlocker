@@ -28,21 +28,7 @@ if "%~1"=="" (
 :found
 echo Using "%FOUND_EXE%"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$exe = $env:FOUND_EXE; ^
-  $workingDirectory = Split-Path $exe; ^
-  $WshShell = New-Object -ComObject WScript.Shell; ^
-  $startup = [Environment]::GetFolderPath('Startup'); ^
-  $link = Join-Path $startup 'StoreAppUpdateBlocker.lnk'; ^
-  $s = $WshShell.CreateShortcut($link); ^
-  $s.TargetPath = $exe; ^
-  $s.Arguments = '--background'; ^
-  $s.WorkingDirectory = $workingDirectory; ^
-  $s.IconLocation = $exe; ^
-  $s.Save(); ^
-  Start-Process -FilePath $exe -ArgumentList '--background' -WorkingDirectory $workingDirectory -WindowStyle Hidden -ErrorAction Stop; ^
-  Write-Output ( 'Created shortcut at ' + $link ); ^
-  Write-Output 'Launched StoreAppUpdateBlocker.'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $exe = $env:FOUND_EXE; $workingDirectory = Split-Path -LiteralPath $exe; $WshShell = New-Object -ComObject WScript.Shell; $startup = [Environment]::GetFolderPath('Startup'); $link = Join-Path $startup 'StoreAppUpdateBlocker.lnk'; $s = $WshShell.CreateShortcut($link); $s.TargetPath = $exe; $s.Arguments = '--background'; $s.WorkingDirectory = $workingDirectory; $s.IconLocation = $exe; $s.Save(); Start-Process -FilePath $exe -ArgumentList '--background' -WorkingDirectory $workingDirectory -WindowStyle Hidden -ErrorAction Stop; Write-Output ('Created shortcut at ' + $link); Write-Output 'Launched StoreAppUpdateBlocker.'"
 
 if %ERRORLEVEL% EQU 0 (
   echo Shortcut created in Startup and blocker launched.

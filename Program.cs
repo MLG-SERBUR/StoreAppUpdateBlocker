@@ -23,10 +23,8 @@ namespace StoreBlocker
         private static readonly object AttemptLock = new object();
         private static readonly Dictionary<string, DateTimeOffset> RecentAttempts =
             new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
-        private static bool EnableFileLogging;
 
         private const string InstanceMutexName = @"Local\StoreAppUpdateBlocker";
-        private const string InstanceInfoFileName = "active-instance.txt";
         private const int SwHide = 0;
         private const uint WmQuit = 0x0012;
         private const uint PmNoRemove = 0x0000;
@@ -63,7 +61,6 @@ namespace StoreBlocker
             public WatchMode Mode { get; private set; } = WatchMode.EventHook;
             public TimeSpan ScanInterval { get; private set; } = TimeSpan.FromSeconds(3);
             public bool Background { get; private set; }
-            public bool LogToFile { get; private set; }
             public bool ReplaceExisting { get; private set; } = true;
             public bool ShowHelp { get; private set; }
 
@@ -99,9 +96,6 @@ namespace StoreBlocker
                         case "--background":
                             options.Background = true;
                             break;
-                        case "--log":
-                            options.LogToFile = true;
-                            break;
                         case "--replace-existing":
                             options.ReplaceExisting = true;
                             break;
@@ -120,13 +114,6 @@ namespace StoreBlocker
 
                 return options;
             }
-        }
-
-        private sealed class InstanceInfo
-        {
-            public int ProcessId { get; init; }
-            public long StartTimeUtcTicks { get; init; }
-            public string ExecutablePath { get; init; } = string.Empty;
         }
 
         [DllImport("kernel32.dll")]
@@ -184,8 +171,6 @@ namespace StoreBlocker
                 HideConsoleWindow();
             }
 
-            EnableFileLogging = options.LogToFile;
-
             using var instanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
             var ownsMutex = createdNew;
 
@@ -207,14 +192,11 @@ namespace StoreBlocker
 
             try
             {
-                WriteInstanceInfo();
                 WriteInfo("Store App Update Blocker starting.");
-                WriteInfo(string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Mode: {0}. PID: {1}. Log file: {2}",
-                    options.Mode,
-                    Environment.ProcessId,
-                    EnableFileLogging ? GetLogPath() : "disabled"));
+                WriteInfo(
+                    "Mode: " + options.Mode.ToString() +
+                    ". PID: " + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) +
+                    ". Logging: console only");
                 WriteInfo("Blocked apps: " + string.Join(", ", BlockedApps));
 
                 AppInstallManager appManager;
@@ -242,8 +224,6 @@ namespace StoreBlocker
             }
             finally
             {
-                ClearInstanceInfo();
-
                 if (ownsMutex)
                 {
                     try
@@ -573,8 +553,6 @@ namespace StoreBlocker
             var matches = new List<Process>();
             var seenProcessIds = new HashSet<int>();
 
-            TryAddProcessFromInstanceInfo(matches, seenProcessIds, currentProcessId);
-
             if (string.IsNullOrWhiteSpace(currentProcessPath))
             {
                 return matches;
@@ -605,38 +583,6 @@ namespace StoreBlocker
             }
 
             return matches;
-        }
-
-        private static void TryAddProcessFromInstanceInfo(List<Process> matches, HashSet<int> seenProcessIds, int currentProcessId)
-        {
-            if (!TryReadInstanceInfo(out var instanceInfo) || instanceInfo.ProcessId == currentProcessId)
-            {
-                return;
-            }
-
-            Process? process = null;
-
-            try
-            {
-                process = Process.GetProcessById(instanceInfo.ProcessId);
-            }
-            catch
-            {
-                return;
-            }
-
-            var processPath = GetProcessPath(process);
-            if (!TryGetProcessStartTimeUtcTicks(process, out var startTimeUtcTicks) ||
-                startTimeUtcTicks != instanceInfo.StartTimeUtcTicks ||
-                (!string.IsNullOrWhiteSpace(instanceInfo.ExecutablePath) &&
-                 !string.Equals(processPath, instanceInfo.ExecutablePath, StringComparison.OrdinalIgnoreCase)) ||
-                !seenProcessIds.Add(process.Id))
-            {
-                process.Dispose();
-                return;
-            }
-
-            matches.Add(process);
         }
 
         private static bool TryTerminateProcess(Process process)
@@ -727,132 +673,6 @@ namespace StoreBlocker
             }
         }
 
-        private static void WriteInstanceInfo()
-        {
-            try
-            {
-                using var currentProcess = Process.GetCurrentProcess();
-                var startTimeUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks;
-                var instanceInfoPath = GetInstanceInfoPath();
-                var appDataDirectory = GetAppDataDirectory();
-
-                Directory.CreateDirectory(appDataDirectory);
-                File.WriteAllLines(instanceInfoPath, new[]
-                {
-                    "PID=" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
-                    "StartTimeUtcTicks=" + startTimeUtcTicks.ToString(CultureInfo.InvariantCulture),
-                    "Path=" + GetProcessPath(currentProcess)
-                });
-            }
-            catch (Exception ex)
-            {
-                WriteError("Failed to write active instance metadata.", ex);
-            }
-        }
-
-        private static void ClearInstanceInfo()
-        {
-            try
-            {
-                if (!TryReadInstanceInfo(out var instanceInfo))
-                {
-                    return;
-                }
-
-                if (instanceInfo.ProcessId != Environment.ProcessId)
-                {
-                    return;
-                }
-
-                using var currentProcess = Process.GetCurrentProcess();
-                if (!TryGetProcessStartTimeUtcTicks(currentProcess, out var currentStartTimeUtcTicks) ||
-                    currentStartTimeUtcTicks != instanceInfo.StartTimeUtcTicks)
-                {
-                    return;
-                }
-
-                File.Delete(GetInstanceInfoPath());
-            }
-            catch
-            {
-                // Shutdown cleanup should never take the process down.
-            }
-        }
-
-        private static bool TryReadInstanceInfo(out InstanceInfo instanceInfo)
-        {
-            instanceInfo = new InstanceInfo();
-
-            try
-            {
-                var instanceInfoPath = GetInstanceInfoPath();
-                if (!File.Exists(instanceInfoPath))
-                {
-                    return false;
-                }
-
-                var lines = File.ReadAllLines(instanceInfoPath);
-                var processId = -1;
-                long startTimeUtcTicks = 0;
-                var executablePath = string.Empty;
-
-                foreach (var line in lines)
-                {
-                    if (line.StartsWith("PID=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _ = int.TryParse(
-                            line["PID=".Length..],
-                            NumberStyles.Integer,
-                            CultureInfo.InvariantCulture,
-                            out processId);
-                    }
-                    else if (line.StartsWith("StartTimeUtcTicks=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _ = long.TryParse(
-                            line["StartTimeUtcTicks=".Length..],
-                            NumberStyles.Integer,
-                            CultureInfo.InvariantCulture,
-                            out startTimeUtcTicks);
-                    }
-                    else if (line.StartsWith("Path=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        executablePath = line["Path=".Length..];
-                    }
-                }
-
-                if (processId <= 0 || startTimeUtcTicks <= 0)
-                {
-                    return false;
-                }
-
-                instanceInfo = new InstanceInfo
-                {
-                    ProcessId = processId,
-                    StartTimeUtcTicks = startTimeUtcTicks,
-                    ExecutablePath = executablePath
-                };
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool TryGetProcessStartTimeUtcTicks(Process process, out long startTimeUtcTicks)
-        {
-            try
-            {
-                startTimeUtcTicks = process.StartTime.ToUniversalTime().Ticks;
-                return true;
-            }
-            catch
-            {
-                startTimeUtcTicks = 0;
-                return false;
-            }
-        }
-
         private static string GetProcessPath(Process process)
         {
             try
@@ -874,7 +694,6 @@ namespace StoreBlocker
             Console.WriteLine("  --queue-scan            Poll AppInstallItems instead of waiting for events.");
             Console.WriteLine("  --scan-interval <secs>  Queue scan interval in seconds. Default: 3.");
             Console.WriteLine("  --background            Hide the console window after startup.");
-            Console.WriteLine("  --log                   Write a text log to %LOCALAPPDATA%.");
             Console.WriteLine("  --replace-existing      Replace a running blocker instance (default behavior).");
             Console.WriteLine("  --exit-if-running       Exit instead of replacing an existing blocker instance.");
             Console.WriteLine("  --help                  Show this help.");
@@ -908,17 +727,7 @@ namespace StoreBlocker
             {
                 try
                 {
-                    if (EnableFileLogging)
-                    {
-                        var logPath = GetLogPath();
-                        var logDirectory = Path.GetDirectoryName(logPath);
-                        if (!string.IsNullOrEmpty(logDirectory))
-                        {
-                            Directory.CreateDirectory(logDirectory);
-                        }
-
-                        File.AppendAllText(logPath, line + Environment.NewLine);
-                    }
+                    // Console-only logging: never write a file.
                 }
                 catch
                 {
@@ -936,21 +745,5 @@ namespace StoreBlocker
             }
         }
 
-        private static string GetLogPath()
-        {
-            return Path.Combine(GetAppDataDirectory(), "StoreAppUpdateBlocker.log");
-        }
-
-        private static string GetInstanceInfoPath()
-        {
-            return Path.Combine(GetAppDataDirectory(), InstanceInfoFileName);
-        }
-
-        private static string GetAppDataDirectory()
-        {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "StoreAppUpdateBlocker");
-        }
     }
 }
