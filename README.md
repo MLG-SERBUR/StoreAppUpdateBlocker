@@ -93,13 +93,13 @@ StoreAppUpdateBlocker.exe --background --exit-if-running
 
 ## Logs
 
-The app writes a small text log here:
+The app does not write a log file by default. Pass `--log` if you want it to create:
 
 ```text
 %LOCALAPPDATA%\StoreAppUpdateBlocker\StoreAppUpdateBlocker.log
 ```
 
-That gives you a way to confirm it started even when `--background` is used.
+That can be useful if you want a persistent startup record while running hidden with `--background`.
 
 ## Startup options
 
@@ -140,4 +140,4 @@ reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v StoreAppUpdateBl
 - The app keeps a single active instance.
 - A new launch replaces the currently-running blocker instance by default, which is useful during updates.
 - `--exit-if-running` restores the older behavior and exits when another instance is already active.
-- The app logs startup, cancellation attempts, and errors.
+- The app only writes a log file when `--log` is supplied.

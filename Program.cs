@@ -23,6 +23,7 @@ namespace StoreBlocker
         private static readonly object AttemptLock = new object();
         private static readonly Dictionary<string, DateTimeOffset> RecentAttempts =
             new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
+        private static bool EnableFileLogging;
 
         private const string InstanceMutexName = @"Local\StoreAppUpdateBlocker";
         private const string InstanceInfoFileName = "active-instance.txt";
@@ -62,6 +63,7 @@ namespace StoreBlocker
             public WatchMode Mode { get; private set; } = WatchMode.EventHook;
             public TimeSpan ScanInterval { get; private set; } = TimeSpan.FromSeconds(3);
             public bool Background { get; private set; }
+            public bool LogToFile { get; private set; }
             public bool ReplaceExisting { get; private set; } = true;
             public bool ShowHelp { get; private set; }
 
@@ -96,6 +98,9 @@ namespace StoreBlocker
                             break;
                         case "--background":
                             options.Background = true;
+                            break;
+                        case "--log":
+                            options.LogToFile = true;
                             break;
                         case "--replace-existing":
                             options.ReplaceExisting = true;
@@ -179,6 +184,8 @@ namespace StoreBlocker
                 HideConsoleWindow();
             }
 
+            EnableFileLogging = options.LogToFile;
+
             using var instanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
             var ownsMutex = createdNew;
 
@@ -204,10 +211,10 @@ namespace StoreBlocker
                 WriteInfo("Store App Update Blocker starting.");
                 WriteInfo(string.Format(
                     CultureInfo.InvariantCulture,
-                    "Mode: {0}. PID: {1}. Log: {2}",
+                    "Mode: {0}. PID: {1}. Log file: {2}",
                     options.Mode,
                     Environment.ProcessId,
-                    GetLogPath()));
+                    EnableFileLogging ? GetLogPath() : "disabled"));
                 WriteInfo("Blocked apps: " + string.Join(", ", BlockedApps));
 
                 AppInstallManager appManager;
@@ -867,6 +874,7 @@ namespace StoreBlocker
             Console.WriteLine("  --queue-scan            Poll AppInstallItems instead of waiting for events.");
             Console.WriteLine("  --scan-interval <secs>  Queue scan interval in seconds. Default: 3.");
             Console.WriteLine("  --background            Hide the console window after startup.");
+            Console.WriteLine("  --log                   Write a text log to %LOCALAPPDATA%.");
             Console.WriteLine("  --replace-existing      Replace a running blocker instance (default behavior).");
             Console.WriteLine("  --exit-if-running       Exit instead of replacing an existing blocker instance.");
             Console.WriteLine("  --help                  Show this help.");
@@ -900,14 +908,17 @@ namespace StoreBlocker
             {
                 try
                 {
-                    var logPath = GetLogPath();
-                    var logDirectory = Path.GetDirectoryName(logPath);
-                    if (!string.IsNullOrEmpty(logDirectory))
+                    if (EnableFileLogging)
                     {
-                        Directory.CreateDirectory(logDirectory);
-                    }
+                        var logPath = GetLogPath();
+                        var logDirectory = Path.GetDirectoryName(logPath);
+                        if (!string.IsNullOrEmpty(logDirectory))
+                        {
+                            Directory.CreateDirectory(logDirectory);
+                        }
 
-                    File.AppendAllText(logPath, line + Environment.NewLine);
+                        File.AppendAllText(logPath, line + Environment.NewLine);
+                    }
                 }
                 catch
                 {
