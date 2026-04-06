@@ -7,7 +7,7 @@ It supports two runtime modes:
 - `--event-hook`: listen for `AppInstallManager.ItemStatusChanged` notifications
 - `--queue-scan`: poll `AppInstallItems` at a configurable interval
 
-The executable is a normal console app so you can verify that it really started. If you want it silent at startup, add `--background`.
+By default, the app runs with console output so you can verify that it started. Add `--background` to run it without opening a console window.
 
 ## Requirements
 
@@ -67,7 +67,7 @@ Custom scan interval:
 StoreAppUpdateBlocker.exe --queue-scan --scan-interval 2
 ```
 
-Hide the console window after startup:
+Run without opening a console window:
 
 ```cmd
 StoreAppUpdateBlocker.exe --background

@@ -25,11 +25,13 @@ namespace StoreBlocker
             new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
 
         private const string InstanceMutexName = @"Local\StoreAppUpdateBlocker";
-        private const int SwHide = 0;
+        private const uint AttachParentProcess = 0xFFFFFFFF;
+        private const int ErrorAccessDenied = 5;
         private const uint WmQuit = 0x0012;
         private const uint PmNoRemove = 0x0000;
         private static readonly TimeSpan DuplicateSuppressWindow = TimeSpan.FromSeconds(15);
         private static readonly TimeSpan ReplaceExistingTimeout = TimeSpan.FromSeconds(10);
+        private static bool ConsoleAvailable;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct Point
@@ -117,14 +119,15 @@ namespace StoreBlocker
         }
 
         [DllImport("kernel32.dll")]
-        private static extern IntPtr GetConsoleWindow();
-
-        [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
 
-        [DllImport("user32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        private static extern bool AttachConsole(uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AllocConsole();
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -155,6 +158,7 @@ namespace StoreBlocker
             }
             catch (ArgumentException ex)
             {
+                EnsureConsole();
                 WriteError(ex.Message);
                 PrintHelp();
                 return 1;
@@ -162,14 +166,12 @@ namespace StoreBlocker
 
             if (options.ShowHelp)
             {
+                EnsureConsole();
                 PrintHelp();
                 return 0;
             }
 
-            if (options.Background)
-            {
-                HideConsoleWindow();
-            }
+            InitializeConsole(options);
 
             using var instanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
             var ownsMutex = createdNew;
@@ -491,13 +493,49 @@ namespace StoreBlocker
             }
         }
 
-        private static void HideConsoleWindow()
+        private static void InitializeConsole(Options options)
         {
-            var consoleWindow = GetConsoleWindow();
-            if (consoleWindow != IntPtr.Zero)
+            if (options.Background)
             {
-                ShowWindow(consoleWindow, SwHide);
+                return;
             }
+
+            EnsureConsole();
+        }
+
+        private static void EnsureConsole()
+        {
+            if (ConsoleAvailable)
+            {
+                return;
+            }
+
+            if (AttachConsole(AttachParentProcess))
+            {
+                ConsoleAvailable = true;
+                RefreshConsoleStreams();
+                return;
+            }
+
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorAccessDenied)
+            {
+                ConsoleAvailable = true;
+                RefreshConsoleStreams();
+                return;
+            }
+
+            if (AllocConsole())
+            {
+                ConsoleAvailable = true;
+                RefreshConsoleStreams();
+            }
+        }
+
+        private static void RefreshConsoleStreams()
+        {
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
         }
 
         private static bool TryReplaceExistingInstance(Mutex instanceMutex)
@@ -687,13 +725,14 @@ namespace StoreBlocker
 
         private static void PrintHelp()
         {
+            EnsureConsole();
             Console.WriteLine("Usage: StoreAppUpdateBlocker.exe [options]");
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  --event-hook            Use the AppInstallManager.ItemStatusChanged hook (default).");
             Console.WriteLine("  --queue-scan            Poll AppInstallItems instead of waiting for events.");
             Console.WriteLine("  --scan-interval <secs>  Queue scan interval in seconds. Default: 3.");
-            Console.WriteLine("  --background            Hide the console window after startup.");
+            Console.WriteLine("  --background            Run without opening a console window.");
             Console.WriteLine("  --replace-existing      Replace a running blocker instance (default behavior).");
             Console.WriteLine("  --exit-if-running       Exit instead of replacing an existing blocker instance.");
             Console.WriteLine("  --help                  Show this help.");
@@ -737,7 +776,10 @@ namespace StoreBlocker
 
             try
             {
-                Console.WriteLine(line);
+                if (ConsoleAvailable)
+                {
+                    Console.WriteLine(line);
+                }
             }
             catch
             {
